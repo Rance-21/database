@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2.189"
+rustc-hash = "2.1.3"

@@ -36,6 +36,7 @@ impl PageArena {
         })
     }
 
+    // 根据帧id返回内存上的页
     pub fn frame_ptr(&self, frame_id: usize) -> *mut PageData {
         unsafe { self.ptr.as_ptr().add(frame_id * PAGE_SIZE).cast() }
     }
