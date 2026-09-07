@@ -1,7 +1,8 @@
+mod linear_hash;
 mod storage;
+mod sync;
 
 use std::io::Result;
-
 use storage::{arena::PageArena, disk::DiskManager};
 
 fn main() -> Result<()> {
