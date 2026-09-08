@@ -1,8 +1,8 @@
+use crate::sync::spin_lock::SpinLock;
 use std::arch::x86_64::*;
 use std::hint::spin_loop;
+use std::sync::atomic::fence;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-use crate::sync::spin_lock::SpinLock;
 
 const GROUP_SIZE: usize = 16;
 
@@ -151,7 +151,9 @@ impl ConcurrentHashMap {
                     }
                 }
 
-                let version_after = group.version.load(Ordering::Acquire);
+                fence(Ordering::Acquire);
+
+                let version_after = group.version.load(Ordering::Relaxed);
 
                 // snapshot 完整，没有 writer 插进来
                 if version_before == version_after {

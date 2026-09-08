@@ -1,4 +1,4 @@
-mod linear_hash;
+mod hash_map;
 mod storage;
 mod sync;
 
