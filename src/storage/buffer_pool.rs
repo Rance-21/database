@@ -23,7 +23,6 @@ use std::{
  * 同一个 page 的并发 miss 必须合并，否则：
  * Thread A: miss page 100 -> frame 3
  * Thread B: miss page 100 -> frame 8
- * 最后同一个 page 会同时存在两个副本
  */
 const PAGE_WAIT_SHARDS: usize = 64;
 
@@ -89,10 +88,6 @@ pub struct BufferPool {
      */
     free_frames: Mutex<Vec<usize>>,
 
-    /*
-     * page_id -> frame_id
-     * get 是我们自己实现的 lockless read path。
-     */
     page_table: ConcurrentHashMap,
 
     // GCLOCK 全局只剩一个 atomic clock hand。
@@ -122,13 +117,6 @@ unsafe impl Sync for BufferPool {}
 
 impl BufferPool {
     pub fn new(disk: DiskManager, frame_count: usize) -> Result<Self> {
-        if frame_count == 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "BufferPool 至少需要一个 frame",
-            ));
-        }
-
         let arena = PageArena::new(frame_count)?;
 
         let metadata = (0..frame_count)
@@ -161,27 +149,10 @@ impl BufferPool {
         })
     }
 
-    /*
-     * fetch 的快路径：
-     * page_table.get
-     *      ↓
-     * per-frame CAS pin
-     *      ↓
-     * usage_count++
-     *      ↓
-     * return
-     * 不经过：
-     *     free list Mutex
-     *     page wait Mutex
-     *     replacer lock
-     *     disk IO lock
-     */
     pub fn fetch_page(&self, page_id: u64) -> Result<*mut PageData> {
         loop {
             if let Some(frame_id) = self.page_table.get(page_id) {
-                if frame_id >= self.metadata.len() {
-                    return Err(Error::new(ErrorKind::Other, "page table 包含非法 frame_id"));
-                }
+                debug_assert!(frame_id < self.metadata.len());
 
                 match self.metadata[frame_id].try_pin(page_id)? {
                     PinResult::Pinned => {
@@ -191,7 +162,6 @@ impl BufferPool {
                     /*
                      * frame 正在 loading / evicting。
                      * 磁盘 IO 可能很慢，所以绝不能 spin。
-                     * 用 Condvar 睡眠等待状态变化。
                      */
                     PinResult::Busy => {
                         self.wait_for_frame_change(page_id, frame_id)?;
@@ -210,8 +180,7 @@ impl BufferPool {
 
             /*
              * page 不在 BufferPool 中。
-             * claim_page_load() 保证同一个 page 只有一个线程
-             * 真正负责磁盘 IO。
+             * claim_page_load() 保证同一个 page 只有一个线程真正负责磁盘 IO。
              */
             if self.claim_page_load(page_id) {
                 return self.load_page(page_id);
@@ -231,9 +200,7 @@ impl BufferPool {
             .get(page_id)
             .ok_or_else(|| Error::new(ErrorKind::NotFound, "unpin 的 page 不在 BufferPool 中"))?;
 
-        if frame_id >= self.metadata.len() {
-            return Err(Error::new(ErrorKind::Other, "page table 包含非法 frame_id"));
-        }
+        debug_assert!(frame_id < self.metadata.len());
 
         self.metadata[frame_id].unpin(page_id, is_dirty)
     }
@@ -257,11 +224,6 @@ impl BufferPool {
             }
 
             if loading_pages.insert(page_id) {
-                /*
-                 * 这里只登记：
-                 *     “这个 page 已经有人负责加载。”
-                 * Mutex 马上释放。后面的 pread/pwrite 完全不持有它。
-                 */
                 return true;
             }
 
@@ -286,8 +248,7 @@ impl BufferPool {
         let meta = &self.metadata[frame_id];
 
         /*
-         * frame 现在是：
-         *     LOADING   pin_count = 1
+         * frame 现在是：LOADING
          * 但还没有 publish 到 page_table，
          * 所以其他线程不可能访问它。
          */
@@ -297,18 +258,6 @@ impl BufferPool {
 
         let ptr = self.arena.frame_ptr(frame_id);
 
-        /*
-         * 真正的磁盘读取。
-         * 此时：
-         * - 没有 free-list 锁
-         * - 没有 page-load shard 锁
-         * - 没有 replacer 锁
-         * 所以：
-         * read page 100
-         * read page 200
-         * write page 300
-         * 可以在不同线程中并行进行。
-         */
         if let Err(error) = unsafe { self.disk.read_page(page_id, ptr) } {
             self.release_loading_frame(frame_id);
             self.finish_page_load_failure(page_id);
@@ -326,8 +275,7 @@ impl BufferPool {
 
     /*
      * 找一个 frame 给新的 page
-     * 优先： free list
-     * free list 为空才 GCLOCK eviction
+     * 优先： free list ，为空才 GCLOCK eviction
      */
     fn reserve_frame(&self) -> Result<usize> {
         if let Some(frame_id) = self.free_frames.lock().unwrap().pop() {
@@ -335,7 +283,6 @@ impl BufferPool {
 
             /*
              * free list 中的 frame 理论上一定是 FREE。
-             * CAS 是为了让这个约束被代码真正检查，而不是只靠相信。
              */
             meta.state_and_pin
                 .compare_exchange(
@@ -568,25 +515,7 @@ impl BufferPool {
     fn publish_loaded_page(&self, page_id: u64, frame_id: usize) -> Result<()> {
         let shard = self.page_wait_shard(page_id);
         let mut loading_pages = shard.loading_pages.lock().unwrap();
-
-        if !loading_pages.contains(&page_id) {
-            return Err(Error::new(ErrorKind::Other, "page load owner 状态丢失"));
-        }
-
-        /*
-         * 在同一个 shard Mutex 下重新检查。
-         * 理论上不会出现，因为同一个 page 只能有一个 loader。
-         */
-        if self.page_table.get(page_id).is_some() {
-            loading_pages.remove(&page_id);
-            shard.changed.notify_all();
-
-            return Err(Error::new(
-                ErrorKind::AlreadyExists,
-                "page 在加载过程中被重复 publish",
-            ));
-        }
-
+        
         /*
          * 先把 mapping 放进去，再把 frame 切成 READY。
          * 这中间另一个线程可能短暂看到：

@@ -90,12 +90,8 @@ impl FrameMeta {
                 FRAME_READY => {}
 
                 /*
-                 * EVICTING：
-                 * CLOCK 已经抢走这个 frame。
-                 * LOADING：
-                 * page 已经被 publish 到 page_table，
-                 * 但状态转换还没有完全结束。
-                 * 两种情况都应该等待状态变化，而不是忙等。
+                 * EVICTING：CLOCK 已经抢走这个 frame。
+                 * LOADING：page 已经被 publish 到 page_table，但可能是dirty
                  */
                 FRAME_LOADING | FRAME_EVICTING => {
                     return Ok(PinResult::Busy);
@@ -115,14 +111,12 @@ impl FrameMeta {
             }
 
             /*
-             * state 位不变，只给低 20 bit 的 pin_count + 1。
              * 如果此时 evictor：READY,0 -> EVICTING,0
-             * 抢先成功，那么这个 CAS 会失败。
-             * 如果这里：READY,0 -> READY,1
-             * 抢先成功，那么 evictor 的 CAS 会失败。
+             * 抢先成功，那么这个 CAS 会失败，回到循坏最初等待
              */
             if self
                 .state_and_pin
+                //低位可以直接加，前面的PIN_MASK保证不会溢出
                 .compare_exchange_weak(old, old + 1, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
             {
@@ -163,12 +157,7 @@ impl FrameMeta {
                 return Err(Error::new(ErrorKind::Other, "只能 unpin READY frame"));
             }
 
-            if pin_count(old) == 0 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "frame pin_count 已经为 0",
-                ));
-            }
+            debug_assert_ne!(pin_count(old), 0);
 
             /*
              * dirty 一定要在 pin_count-- 之前发布。
@@ -178,10 +167,6 @@ impl FrameMeta {
              *     Thread B: CLOCK 抢走 frame，看到 clean
              *     Thread A: dirty = true
              * B 就可能直接覆盖一个实际上修改过的页面。
-             * 所以顺序必须是：
-             *     dirty = true
-             *     ↓
-             *     pin_count--
              */
             if is_dirty {
                 self.flags.fetch_or(FLAG_DIRTY, Ordering::Release);

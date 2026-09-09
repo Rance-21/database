@@ -1,6 +1,5 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Result};
-use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
