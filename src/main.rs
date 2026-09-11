@@ -1,4 +1,5 @@
 mod hash_map;
+mod index;
 mod storage;
 mod sync;
 
@@ -8,7 +9,7 @@ use storage::{arena::PageArena, disk::DiskManager};
 fn main() -> Result<()> {
     let mut disk = DiskManager::open("test.db")?;
 
-    let page_id = disk.allocate_page()?;
+    let page_id = disk.new_page()?;
 
     let arena = PageArena::new(16)?;
     let frame = arena.frame_ptr(0);

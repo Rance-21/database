@@ -26,12 +26,19 @@ impl DiskManager {
     }
 
     //SSD文件多一页
-    pub fn allocate_page(&mut self) -> Result<u64> {
+    /*
+        A: 分到 Page 100
+    B: 分到 Page 101
+
+    B: set_len(102 pages)
+    A: set_len(101 pages)
+         */
+    pub fn new_page(&mut self) -> Result<u64> {
         let page_id = self.next_page_id;
+
+        self.file
+            .set_len((self.next_page_id + 1) * PAGE_SIZE as u64)?;
         self.next_page_id += 1;
-
-        self.file.set_len(self.next_page_id * PAGE_SIZE as u64)?;
-
         Ok(page_id)
     }
 

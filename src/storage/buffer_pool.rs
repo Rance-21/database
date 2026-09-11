@@ -515,7 +515,7 @@ impl BufferPool {
     fn publish_loaded_page(&self, page_id: u64, frame_id: usize) -> Result<()> {
         let shard = self.page_wait_shard(page_id);
         let mut loading_pages = shard.loading_pages.lock().unwrap();
-        
+
         /*
          * 先把 mapping 放进去，再把 frame 切成 READY。
          * 这中间另一个线程可能短暂看到：
@@ -651,5 +651,9 @@ impl BufferPool {
         let hash = page_id.wrapping_mul(0x9e37_79b9_7f4a_7c15);
 
         &self.page_waiters[hash as usize & (PAGE_WAIT_SHARDS - 1)]
+    }
+
+    pub fn allocate_page_id(&mut self) -> Result<u64> {
+        self.disk.new_page()
     }
 }
