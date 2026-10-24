@@ -63,7 +63,8 @@ impl SpinLock {
                 libc::syscall(
                     libc::SYS_futex,
                     self.state.as_ptr(),
-                    libc::FUTEX_WAIT_PRIVATE,
+                    // libc 分别导出操作码和私有标记，需要按位组合。
+                    libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
                     CONTENDED,
                     std::ptr::null::<libc::timespec>(),
                 );
@@ -94,7 +95,7 @@ impl Drop for SpinLockGuard<'_> {
                 libc::syscall(
                     libc::SYS_futex,
                     self.lock.state.as_ptr(),
-                    libc::FUTEX_WAKE_PRIVATE,
+                    libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
                     1,
                 );
             }
